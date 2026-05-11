@@ -3,12 +3,13 @@ using AForge.Video.DirectShow;
 using crud;
 using MySql.Data.MySqlClient;
 using student_management.forms.Auth;
+using student_management.Helpers;
 using System;
 using System.Drawing;
 using System.Windows.Forms;
 using ZXing;
+using ZXing.Common;
 using ZXing.Windows.Compatibility;
-using student_management.Helpers;
 
 namespace student_management.forms.Admin
 {
@@ -32,8 +33,8 @@ namespace student_management.forms.Admin
             CaptureDevices = new FilterInfoCollection(FilterCategory.VideoInputDevice);
             comboBox1.Items.Clear();
 
-            foreach (FilterInfo Device in CaptureDevices)
-                comboBox1.Items.Add(Device.Name);
+            foreach (FilterInfo device in CaptureDevices)
+                comboBox1.Items.Add(device.Name);
 
             if (comboBox1.Items.Count > 0)
                 comboBox1.SelectedIndex = 0;
@@ -42,8 +43,6 @@ namespace student_management.forms.Admin
 
             timer1.Interval = 500;
             timer1.Stop();
-
-            FinalFrame = new VideoCaptureDevice();
         }
 
         private void btnPlay_Click(object sender, EventArgs e)
@@ -59,7 +58,6 @@ namespace student_management.forms.Admin
             if (FinalFrame != null && FinalFrame.IsRunning)
             {
                 isProcessing = false;
-                timer1.Stop();
                 timer1.Start();
                 return;
             }
@@ -69,7 +67,6 @@ namespace student_management.forms.Admin
             FinalFrame.Start();
 
             isProcessing = false;
-            timer1.Stop();
             timer1.Start();
         }
 
@@ -77,10 +74,30 @@ namespace student_management.forms.Admin
         {
             Bitmap bitmap = (Bitmap)eventArgs.Frame.Clone();
 
-            this.Invoke(new MethodInvoker(delegate
+            try
             {
-                picCamera.Image = bitmap;
-            }));
+                if (picCamera.InvokeRequired)
+                {
+                    picCamera.Invoke(new MethodInvoker(delegate
+                    {
+                        if (picCamera.Image != null)
+                            picCamera.Image.Dispose();
+
+                        picCamera.Image = (Bitmap)bitmap.Clone();
+                    }));
+                }
+                else
+                {
+                    if (picCamera.Image != null)
+                        picCamera.Image.Dispose();
+
+                    picCamera.Image = (Bitmap)bitmap.Clone();
+                }
+            }
+            finally
+            {
+                bitmap.Dispose();
+            }
         }
 
         private void StopCamera()
@@ -179,7 +196,11 @@ namespace student_management.forms.Admin
                 if (!studentReader.Read())
                 {
                     studentReader.Close();
-                    ShowStudentInfo("Not Found", "-", "-", "-", "Invalid QR");
+
+                    ShowStudentInfo("Not Found", "-", "-", "-", "Invalid QR: " + qrValue);
+
+                    isProcessing = false;
+                    timer1.Start();
                     return;
                 }
 
@@ -219,7 +240,7 @@ namespace student_management.forms.Admin
 
                     insertCmd.ExecuteNonQuery();
 
-                    currentAttendanceId = (int)insertCmd.LastInsertedId;
+                    currentAttendanceId = Convert.ToInt32(insertCmd.LastInsertedId);
                     btnTimeOut.Enabled = true;
 
                     ShowStudentInfo(
@@ -229,6 +250,9 @@ namespace student_management.forms.Admin
                         "-",
                         "Timed In"
                     );
+
+                    timer1.Stop();
+                    isProcessing = true;
                 }
                 else
                 {
@@ -244,23 +268,30 @@ namespace student_management.forms.Admin
                     {
                         btnTimeOut.Enabled = true;
                         ShowStudentInfo(studentName, studentNo, timeIn, "-", "Already Timed In");
+
+                        timer1.Stop();
+                        isProcessing = true;
                     }
                     else
                     {
                         btnTimeOut.Enabled = false;
                         currentAttendanceId = 0;
                         ShowStudentInfo(studentName, studentNo, timeIn, timeOut.ToString(), "Completed Today");
+
+                        timer1.Stop();
+                        isProcessing = true;
                     }
                 }
             }
             catch (Exception ex)
             {
                 MessageBox.Show("Attendance Error: " + ex.Message);
+                isProcessing = false;
+                timer1.Start();
             }
             finally
             {
                 db.Close();
-                isProcessing = false;
             }
         }
 
@@ -296,7 +327,7 @@ namespace student_management.forms.Admin
 
                     btnTimeOut.Enabled = false;
                     currentAttendanceId = 0;
-                    isProcessing = false;
+                    isProcessing = true;
 
                     MessageBox.Show("Time Out saved. Click Play for next student.");
                 }
@@ -305,7 +336,7 @@ namespace student_management.forms.Admin
                     lblStatus.Text = "Status: Already Timed Out";
                     btnTimeOut.Enabled = false;
                     currentAttendanceId = 0;
-                    isProcessing = false;
+                    isProcessing = true;
                 }
             }
             catch (Exception ex)
@@ -325,29 +356,40 @@ namespace student_management.forms.Admin
 
             try
             {
-                BarcodeReader reader = new BarcodeReader();
-
-                Bitmap bitmap = new Bitmap(picCamera.Image);
-                Result result = reader.Decode(bitmap);
-                bitmap.Dispose();
-
-                if (result != null)
+                var reader = new BarcodeReaderGeneric
                 {
-                    isProcessing = true;
-                    timer1.Stop();
+                    AutoRotate = true,
+                    Options = new DecodingOptions
+                    {
+                        TryHarder = true
+                    }
+                };
 
-                    string qrValue = result.Text.Trim();
+                using (Bitmap bitmap = new Bitmap(picCamera.Image))
+                {
+                    BitmapLuminanceSource source = new BitmapLuminanceSource(bitmap);
+                    BinaryBitmap binaryBitmap = new BinaryBitmap(new HybridBinarizer(source));
 
-                    SaveAttendance(qrValue);
+                    Result result = reader.Decode(source);
 
-                    // Scanner stops here.
-                    // Click Time Out, then click Play again for next student.
+                    if (result != null)
+                    {
+                        isProcessing = true;
+                        timer1.Stop();
+
+                        string qrValue = result.Text.Trim();
+
+                        lblStatus.Text = "QR detected: " + qrValue;
+
+                        SaveAttendance(qrValue);
+                    }
                 }
             }
-            catch
+            catch (Exception ex)
             {
+                timer1.Stop();
                 isProcessing = false;
-                timer1.Start();
+                MessageBox.Show("Scanner error: " + ex.Message);
             }
         }
 
@@ -358,6 +400,7 @@ namespace student_management.forms.Admin
 
         private void btnDaashboard_Click(object sender, EventArgs e)
         {
+            StopCamera();
             TeacherDashBoard frm = new TeacherDashBoard();
             frm.Show();
             this.Hide();
@@ -365,6 +408,7 @@ namespace student_management.forms.Admin
 
         private void btnScanner_Click(object sender, EventArgs e)
         {
+            StopCamera();
             QRScannerForm frm = new QRScannerForm();
             frm.Show();
             this.Hide();
@@ -372,6 +416,7 @@ namespace student_management.forms.Admin
 
         private void btnStudentManagement_Click(object sender, EventArgs e)
         {
+            StopCamera();
             StudentManagementForm frm = new StudentManagementForm();
             frm.Show();
             this.Hide();
@@ -379,6 +424,7 @@ namespace student_management.forms.Admin
 
         private void button1_Click_1(object sender, EventArgs e)
         {
+            StopCamera();
             Session.Clear();
             Login frm = new Login();
             frm.Show();
@@ -387,6 +433,7 @@ namespace student_management.forms.Admin
 
         private void btnAttendanceRecords_Click_1(object sender, EventArgs e)
         {
+            StopCamera();
             AttendanceHistoryForm frm = new AttendanceHistoryForm();
             frm.Show();
             this.Hide();
